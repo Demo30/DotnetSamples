@@ -19,7 +19,7 @@ if %errorlevel% neq 0 (
 echo Running EtwEventSource demo as Administrator...
 echo.
 
-pushd "%~dp0EtwEventSource"
+pushd "%~dp0"
 dotnet run
 popd
 
