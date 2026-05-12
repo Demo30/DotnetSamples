@@ -78,10 +78,14 @@ static class Program
     {
         Section("What this sample demonstrates");
         Console.WriteLine("""
-          This program demonstrates the full ETW (Event Tracing for Windows) pipeline:
+          This program demonstrates the full ETW (Event Tracing for Windows) pipeline
+          WITHOUT using channels — meaning events are ephemeral unless you actively
+          capture them with a tool like logman or PerfView.
 
           1. EMIT   — A custom EventSource (MyTestSource) writes structured events in-process
-                      using the .NET EventSource API.
+                      using the .NET EventSource API. No channel is defined, so the Event Log
+                      Service will NOT automatically save these — they only exist in ETW
+                      kernel buffers until someone captures them.
 
           2. CAPTURE — logman creates a kernel-level ETW trace session that intercepts those
                        events and writes them to a binary .etl file, with no code changes
@@ -90,6 +94,9 @@ static class Program
           3. DECODE — tracerpt reads the .etl and converts it to human-readable XML.
                       For payloads to be decoded (rather than shown as raw BinaryEventData),
                       the event schema must be known. This is what the manifest is for.
+
+          Later, Part 2 and Part 3 show alternative approaches that DO persist events
+          automatically — via the traditional EventLog API and via ETW channels.
 
           The manifest is an XML file generated from the EventSource class that describes
           every event: its ID, name, parameters, and message template. It is registered
