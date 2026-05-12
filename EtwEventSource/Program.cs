@@ -23,6 +23,7 @@ static class Program
         }
 
         // In-process listener lets us verify events fire even without ETW.
+        BigSection("PART 1: ETW with logman — manual capture to .etl file");
         Section("In-process listener");
         using var listener = new MyEventSourceListener("InProc");
         Console.WriteLine();
@@ -360,6 +361,7 @@ static class Program
         const string sourceName = "DotnetSamples-TraditionalLog";
         const string logName = "Application";
 
+        BigSection("PART 2: Traditional EventLog API — direct write to Event Viewer");
         Section("[EventLog 2] Writing events to Event Viewer");
         Console.WriteLine($"  Source: {sourceName}");
         Console.WriteLine($"  Log:    {logName}");
@@ -410,7 +412,7 @@ static class Program
 
             foreach (var entry in recent)
             {
-                Console.Write($"  {entry.TimeGenerated,-22:yyyy-MM-dd HH:mm:ss}  {entry.EntryType,-12}  {entry.EventID,-4}  ");
+                Console.Write($"  {entry.TimeGenerated,-22:yyyy-MM-dd HH:mm:ss}  {entry.EntryType,-12}  {entry.InstanceId,-4}  ");
                 Console.ForegroundColor = ConsoleColor.Green;
                 var msg = entry.Message.ReplaceLineEndings(" ");
                 Console.WriteLine(msg.Length > 55 ? msg[..52] + "..." : msg);
@@ -452,7 +454,7 @@ static class Program
             "EtwEventSourceDemo", "channel-demo.man");
         var resourceDllPath = Path.ChangeExtension(manifestPath, ".dll");
 
-        Console.WriteLine();
+        BigSection("PART 3: ETW Channel — automatic capture by Event Log Service");
         Section("[ETW Channel] Registering for post-reboot test");
         Console.WriteLine("""
             This section registers the ChannelEventSource manifest so the Event Log
@@ -656,6 +658,17 @@ static class Program
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine($"── {title} {line}");
         Console.ResetColor();
+    }
+
+    static void BigSection(string title)
+    {
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine(new string('═', 70));
+        Console.WriteLine($"  {title}");
+        Console.WriteLine(new string('═', 70));
+        Console.ResetColor();
+        Console.WriteLine();
     }
 
     static void WriteError(string message)
