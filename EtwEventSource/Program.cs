@@ -357,7 +357,7 @@ static class Program
 
     static void DemoTraditionalEventLog()
     {
-        const string sourceName = "DotnetSamples-EventLogDemo";
+        const string sourceName = "DotnetSamples-TraditionalLog";
         const string logName = "Application";
 
         Section("[EventLog 2] Writing events to Event Viewer");
@@ -372,19 +372,19 @@ static class Program
         }
 
         System.Diagnostics.EventLog.WriteEntry(sourceName,
-            "Request started: https://example.com/api/users",
-            System.Diagnostics.EventLogEntryType.Information, 1);
-        Console.WriteLine("  → Request started (Information, ID=1)");
+            "[Traditional] App started successfully — listening on port 8080",
+            System.Diagnostics.EventLogEntryType.Information, 100);
+        Console.WriteLine("  → App started (Information, ID=100)");
 
         System.Diagnostics.EventLog.WriteEntry(sourceName,
-            "Request completed: 200 OK — 3 users returned",
-            System.Diagnostics.EventLogEntryType.Information, 2);
-        Console.WriteLine("  → Request completed (Information, ID=2)");
+            "[Traditional] Database connection pool initialized — 10 connections ready",
+            System.Diagnostics.EventLogEntryType.Information, 101);
+        Console.WriteLine("  → DB pool ready (Information, ID=101)");
 
         System.Diagnostics.EventLog.WriteEntry(sourceName,
-            "Response time exceeded 500ms threshold",
-            System.Diagnostics.EventLogEntryType.Warning, 3);
-        Console.WriteLine("  → Warning (ID=3)");
+            "[Traditional] Memory usage above 80% — consider scaling up",
+            System.Diagnostics.EventLogEntryType.Warning, 102);
+        Console.WriteLine("  → Memory warning (Warning, ID=102)");
         Console.WriteLine();
 
         Section("[EventLog 3] Reading back from Event Viewer");
@@ -431,7 +431,7 @@ static class Program
           │  To browse these events yourself:                               │
           │    1. Open Event Viewer (eventvwr.msc)                          │
           │    2. Go to: Windows Logs → Application                         │
-          │    3. Filter by Source: DotnetSamples-EventLogDemo              │
+          │    3. Filter by Source: DotnetSamples-TraditionalLog              │
           │                                                                 │
           │  These events were saved permanently by the Event Log Service.  │
           │  No logman, no PerfView, no ETW session needed.                 │
