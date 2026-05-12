@@ -311,8 +311,8 @@ static class Program
           │     • Best for: system providers installed via MSI/setup        │
           └────────────────────────────────────────────────────────────────────┘
 
-          Below we use approach #1 (the traditional API) to demonstrate events
-          appearing in Event Viewer. See ChannelEventSource.cs for approach #2.
+          Part 2 below demonstrates approach #1 (traditional API).
+          Part 3 demonstrates approach #2 (ETW channels).
         """);
 
         if (!isAdmin)
@@ -323,44 +323,8 @@ static class Program
             return;
         }
 
-        ShowChannelSourceCode();
         DemoTraditionalEventLog();
         DemoEtwChannel();
-    }
-
-    static void ShowChannelSourceCode()
-    {
-        Section("[EventLog 1] How ETW channels are defined (for reference)");
-        Console.WriteLine("""
-            In ChannelEventSource.cs, events are tagged with a channel:
-
-              [Event(1, Channel = EventChannel.Operational, ...)]
-              public void RequestStarted(string url) => WriteEvent(1, url);
-
-            This generates a <channel> entry in the manifest:
-        """);
-
-        var ntdll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
-        var manifest = EventSource.GenerateManifest(typeof(ChannelEventSource), ntdll)!;
-        var channelLine = manifest.Split('\n')
-            .FirstOrDefault(l => l.Contains("<channel ", StringComparison.OrdinalIgnoreCase));
-        if (channelLine != null)
-        {
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"    {channelLine.Trim()}");
-            Console.ResetColor();
-        }
-
-        Console.WriteLine("""
-
-            In production (installed via MSI), this channel approach works like this:
-              1. Installer registers the manifest + compiles native Win32 resource DLL
-              2. Machine reboots → Event Log Service starts consuming the channel
-              3. From then on, every WriteEvent with a channel is saved automatically
-
-            But in a dev scenario, there's no installer or reboot. So below we use the
-            simpler traditional API to show events appearing in Event Viewer.
-        """);
     }
 
     static void DemoTraditionalEventLog()
@@ -369,7 +333,7 @@ static class Program
         const string logName = "Application";
 
         BigSection("PART 2: Traditional EventLog API — direct write to Event Viewer");
-        Section("[EventLog 2] Writing events to Event Viewer");
+        Section("Writing events to Event Viewer");
         Console.WriteLine($"  Source: {sourceName}");
         Console.WriteLine($"  Log:    {logName}");
         Console.WriteLine();
@@ -396,7 +360,7 @@ static class Program
         Console.WriteLine("  → Memory warning (Warning, ID=102)");
         Console.WriteLine();
 
-        Section("[EventLog 3] Reading back from Event Viewer");
+        Section("Reading back from Event Viewer");
 
         using var log = new System.Diagnostics.EventLog(logName);
         var recent = log.Entries.Cast<System.Diagnostics.EventLogEntry>()
@@ -440,14 +404,10 @@ static class Program
           │  To browse these events yourself:                               │
           │    1. Open Event Viewer (eventvwr.msc)                          │
           │    2. Go to: Windows Logs → Application                         │
-          │    3. Filter by Source: DotnetSamples-TraditionalLog              │
+          │    3. Filter by Source: DotnetSamples-TraditionalLog            │
           │                                                                 │
           │  These events were saved permanently by the Event Log Service.  │
           │  No logman, no PerfView, no ETW session needed.                 │
-          │                                                                 │
-          │  For production apps with ETW channels (see ChannelEventSource),│
-          │  this happens automatically through ETW — no API call needed.   │
-          │  The Event Log Service listens to ETW and saves channel events. │
           └──────────────────────────────────────────────────────────────────┘
         """);
         Console.ResetColor();
@@ -462,16 +422,35 @@ static class Program
         var resourceDllPath = Path.ChangeExtension(manifestPath, ".dll");
 
         BigSection("PART 3: ETW Channel — automatic capture by Event Log Service");
-        Section("[ETW Channel] Registering for post-reboot test");
-        Console.WriteLine("""
-            This section registers the ChannelEventSource manifest so the Event Log
-            Service will start consuming its ETW channel after a reboot.
 
-            Unlike the traditional EventLog API above, this uses the full ETW pipeline:
+        Section("How ETW channels are defined");
+        Console.WriteLine("""
+            In ChannelEventSource.cs, events are tagged with a channel:
+
+              [Event(1, Channel = EventChannel.Operational, ...)]
+              public void RequestStarted(string url) => WriteEvent(1, url);
+
+            This generates a <channel> entry in the manifest:
+        """);
+
+        var ntdll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
+        var manifest = EventSource.GenerateManifest(typeof(ChannelEventSource), ntdll)!;
+        var channelLine = manifest.Split('\n')
+            .FirstOrDefault(l => l.Contains("<channel ", StringComparison.OrdinalIgnoreCase));
+        if (channelLine != null)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"    {channelLine.Trim()}");
+            Console.ResetColor();
+        }
+        Console.WriteLine();
+
+        Section("Registering the channel");
+        Console.WriteLine("""
+            Unlike the traditional EventLog API (Part 2), this uses the full ETW pipeline:
               Your code → ETW kernel buffers → Event Log Service → .evtx → Event Viewer
 
-            The Event Log Service only picks up new channels at boot time, so a reboot
-            is required before events appear. Here's what we do now:
+            To make this work, we need to:
               1. Compile the manifest into a native Win32 resource DLL (mc.exe + rc.exe + csc.exe)
               2. Register it with wevtutil im
               3. Emit some events (they won't appear until after reboot)
