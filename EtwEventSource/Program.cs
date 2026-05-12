@@ -274,63 +274,65 @@ static class Program
         }
     }
 
-    // ── Event Log Channel demo ──────────────────────────────────────────────
+    // ── Event Log demo ─────────────────────────────────────────────────────
 
     static void DemoEventLogChannel(bool isAdmin)
     {
         Console.WriteLine();
-        Section("Event Log Channel — how it works");
+        Section("Event Log — the built-in \"stenographer\"");
         Console.WriteLine("""
           Everything above used logman to manually capture ETW events into an .etl file.
-          But Windows can capture events FOR you automatically — using "channels".
+          But Windows can save events FOR you automatically — using the Event Log.
 
           Windows has a built-in service called the "Event Log Service" (wevtsvc).
-          It's always running and acts as a permanent ETW consumer.
+          It's always running and acts as a permanent event store.
 
-          The flow WITHOUT a channel (what we did above):
-            Your code → ETW kernel buffers → LOST (unless logman/PerfView is recording)
+          There are TWO ways to write to the Event Log:
 
-          The flow WITH a channel:
-            Your code → ETW kernel buffers → Event Log Service → .evtx file → Event Viewer
-                                             ^^^^^^^^^^^^^^^^^^
-                                             This is the built-in "stenographer" that Windows
-                                             provides. It listens to your ETW events 24/7 and
-                                             saves them to disk automatically.
+          ┌────────────────────────────────────────────────────────────────────┐
+          │  1. TRADITIONAL API (System.Diagnostics.EventLog)                │
+          │     • Writes directly to the Event Log — simple and immediate    │
+          │     • Events appear in Event Viewer right away                   │
+          │     • Does NOT use ETW at all                                    │
+          │     • Best for: app logging, operational events                  │
+          │                                                                  │
+          │  2. ETW CHANNELS (EventSource + Channel attribute)              │
+          │     • Events flow through ETW kernel buffers first              │
+          │     • The Event Log Service acts as an automatic ETW consumer   │
+          │     • Requires: manifest + native resource DLL + reboot         │
+          │     • Best for: system providers installed via MSI/setup        │
+          └────────────────────────────────────────────────────────────────────┘
 
-          All you need to do:
-            1. Define a "channel" on your EventSource events (Channel = EventChannel.Operational)
-            2. Register the manifest with Windows (wevtutil im <manifest.xml>)
-            3. Restart the Event Log Service (or reboot) so it picks up the new channel
-          After that, the Event Log Service handles everything.
+          Below we use approach #1 (the traditional API) to demonstrate events
+          appearing in Event Viewer. See ChannelEventSource.cs for approach #2.
         """);
 
         if (!isAdmin)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("  Skipping live demo — manifest registration requires Administrator.");
-            Console.WriteLine("  Re-run elevated to see the channel demo.");
+            Console.WriteLine("  Skipping — Event Log source registration requires Administrator.");
             Console.ResetColor();
             return;
         }
 
-        ShowChannelManifest();
-        RegisterAndDemoChannel();
+        ShowChannelSourceCode();
+        DemoTraditionalEventLog();
     }
 
-    static void ShowChannelManifest()
+    static void ShowChannelSourceCode()
     {
-        Section("[Channel 1] How a channel is defined");
+        Section("[EventLog 1] How ETW channels are defined (for reference)");
         Console.WriteLine("""
             In ChannelEventSource.cs, events are tagged with a channel:
 
               [Event(1, Channel = EventChannel.Operational, ...)]
               public void RequestStarted(string url) => WriteEvent(1, url);
 
-            When we generate the manifest, this creates a <channel> entry:
+            This generates a <channel> entry in the manifest:
         """);
 
-        // Generate and show the manifest's channel entry
-        var manifest = GenerateChannelManifest();
+        var ntdll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
+        var manifest = EventSource.GenerateManifest(typeof(ChannelEventSource), ntdll)!;
         var channelLine = manifest.Split('\n')
             .FirstOrDefault(l => l.Contains("<channel ", StringComparison.OrdinalIgnoreCase));
         if (channelLine != null)
@@ -340,154 +342,105 @@ static class Program
             Console.ResetColor();
         }
 
-        Console.WriteLine();
-        Console.WriteLine("  This tells the Event Log Service: \"Create an Operational log for this provider.\"");
-        Console.WriteLine();
+        Console.WriteLine("""
+
+            In production (installed via MSI), this channel approach works like this:
+              1. Installer registers the manifest + compiles native Win32 resource DLL
+              2. Machine reboots → Event Log Service starts consuming the channel
+              3. From then on, every WriteEvent with a channel is saved automatically
+
+            But in a dev scenario, there's no installer or reboot. So below we use the
+            simpler traditional API to show events appearing in Event Viewer.
+        """);
     }
 
-    static void RegisterAndDemoChannel()
+    static void DemoTraditionalEventLog()
     {
-        var channelName = $"{ChannelEventSource.EventSourceName}/Operational";
-        var manifestPath = Path.Combine(Path.GetTempPath(), "channel-demo.man");
+        const string sourceName = "DotnetSamples-EventLogDemo";
+        const string logName = "Application";
 
-        try
+        Section("[EventLog 2] Writing events to Event Viewer");
+        Console.WriteLine($"  Source: {sourceName}");
+        Console.WriteLine($"  Log:    {logName}");
+        Console.WriteLine();
+
+        if (!System.Diagnostics.EventLog.SourceExists(sourceName))
         {
-            // Step 2: Register the manifest
-            Section("[Channel 2] Registering the manifest");
-            var manifest = GenerateChannelManifest();
-            File.WriteAllText(manifestPath, manifest);
+            System.Diagnostics.EventLog.CreateEventSource(sourceName, logName);
+            Console.WriteLine($"  Created event source: {sourceName}");
+        }
 
-            Run("wevtutil", $"um \"{manifestPath}\""); // clean up stale
-            var (_, err) = Run("wevtutil", $"im \"{manifestPath}\"");
-            Run("wevtutil", $"sl \"{channelName}\" /e:true");
+        System.Diagnostics.EventLog.WriteEntry(sourceName,
+            "Request started: https://example.com/api/users",
+            System.Diagnostics.EventLogEntryType.Information, 1);
+        Console.WriteLine("  → Request started (Information, ID=1)");
 
-            bool registered = string.IsNullOrWhiteSpace(err) ||
-                err.Contains("does not contain the metadata resource", StringComparison.OrdinalIgnoreCase);
+        System.Diagnostics.EventLog.WriteEntry(sourceName,
+            "Request completed: 200 OK — 3 users returned",
+            System.Diagnostics.EventLogEntryType.Information, 2);
+        Console.WriteLine("  → Request completed (Information, ID=2)");
 
-            if (registered)
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"  ✓ Manifest registered. Channel created: {channelName}");
-                Console.ResetColor();
-            }
-            else
-            {
-                WriteError($"wevtutil im failed: {err.Trim()}");
-                return;
-            }
+        System.Diagnostics.EventLog.WriteEntry(sourceName,
+            "Response time exceeded 500ms threshold",
+            System.Diagnostics.EventLogEntryType.Warning, 3);
+        Console.WriteLine("  → Warning (ID=3)");
+        Console.WriteLine();
 
-            // Step 3: Emit events
-            Section("[Channel 3] Emitting events via ChannelEventSource");
-            if (ChannelEventSource.Log.ConstructionException is { } ex)
-            {
-                WriteError($"ChannelEventSource construction failed: {ex}");
-                return;
-            }
-            Thread.Sleep(1000); // let the ETW enable callback arrive
+        Section("[EventLog 3] Reading back from Event Viewer");
 
-            ChannelEventSource.Log.RequestStarted("https://example.com/api/users");
-            Console.WriteLine("  → RequestStarted (Informational)");
-            ChannelEventSource.Log.RequestCompleted("200 OK — 3 users returned");
-            Console.WriteLine("  → RequestCompleted (Informational)");
-            ChannelEventSource.Log.OperationWarning("Response time exceeded 500ms threshold");
-            Console.WriteLine("  → OperationWarning (Warning)");
+        using var log = new System.Diagnostics.EventLog(logName);
+        var recent = log.Entries.Cast<System.Diagnostics.EventLogEntry>()
+            .Where(e => e.Source == sourceName)
+            .OrderByDescending(e => e.TimeGenerated)
+            .Take(5)
+            .ToList();
+
+        if (recent.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  ✓ {recent.Count} event(s) found in Event Viewer!");
+            Console.ResetColor();
             Console.WriteLine();
 
-            // Step 4: Check if events appeared
-            Thread.Sleep(2000);
-            Section("[Channel 4] Checking Event Viewer");
-            var (xml, _) = Run("wevtutil", $"qe \"{channelName}\" /f:text /c:10");
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  {"Time",-22}  {"Type",-12}  {"ID",-4}  Message");
+            Console.WriteLine($"  {"────",-22}  {"────",-12}  {"──",-4}  ───────────────────────────────────");
+            Console.ResetColor();
 
-            if (!string.IsNullOrWhiteSpace(xml) && !xml.Contains("No events were found"))
+            foreach (var entry in recent)
             {
+                Console.Write($"  {entry.TimeGenerated,-22:yyyy-MM-dd HH:mm:ss}  {entry.EntryType,-12}  {entry.EventID,-4}  ");
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("  ✓ Events found in Event Viewer:");
-                Console.ResetColor();
-                foreach (var line in xml.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                    Console.WriteLine($"    {line.TrimEnd()}");
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("""
-                    Events were emitted but aren't visible in Event Viewer yet.
-
-                    This is expected! The Event Log Service picks up new channels when:
-                      • The manifest is registered at install time (MSI/setup), AND
-                      • The Event Log Service is restarted (or the machine reboots)
-
-                    In a development scenario like this, the channel is created but the
-                    Event Log Service hasn't started its ETW consumer session for it yet.
-
-                    To see the channel working:
-                      1. Keep the manifest registered (don't clean up)
-                      2. Restart the Event Log Service:
-                         Restart-Service EventLog
-                      3. Run this program again
-                      4. Check Event Viewer → Applications and Services Logs
-                """);
-                Console.ResetColor();
-
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine($"""
-
-                    In production, this all happens automatically because:
-                      • The manifest is registered during app installation
-                      • The Event Log Service starts its consumer on next boot
-                      • From then on, every WriteEvent with a channel is saved forever
-                      • You browse them in Event Viewer at: {channelName}
-
-                    That's the "stenographer" — always listening, always writing it down.
-                """);
-                Console.ResetColor();
-            }
-
-            Console.WriteLine();
-        }
-        finally
-        {
-            // Clean up the manifest registration
-            if (File.Exists(manifestPath))
-            {
-                Run("wevtutil", $"um \"{manifestPath}\"");
-                File.Delete(manifestPath);
-                Console.ForegroundColor = ConsoleColor.DarkGray;
-                Console.WriteLine("  Manifest unregistered and cleaned up.");
+                var msg = entry.Message.ReplaceLineEndings(" ");
+                Console.WriteLine(msg.Length > 55 ? msg[..52] + "..." : msg);
                 Console.ResetColor();
             }
         }
-    }
-
-    static string GenerateChannelManifest()
-    {
-        var assemblyPath = typeof(ChannelEventSource).Assembly.Location;
-        if (string.IsNullOrEmpty(assemblyPath))
-            assemblyPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
-        return EventSource.GenerateManifest(typeof(ChannelEventSource), assemblyPath)!;
-    }
-
-    // Wraps Process.Start for the channel demo.
-    static (string Out, string Err) Run(string exe, string args)
-    {
-        try
+        else
         {
-            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, args)
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false,
-                CreateNoWindow         = true,
-            })!;
-            var outTask = p.StandardOutput.ReadToEndAsync();
-            var errTask = p.StandardError.ReadToEndAsync();
-            p.WaitForExit();
-            return (outTask.Result, errTask.Result);
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  No events found (unexpected).");
+            Console.ResetColor();
         }
-        catch (Exception ex)
-        {
-            return ("", $"[error launching {exe}]: {ex.Message}");
-        }
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("""
+          ┌──────────────────────────────────────────────────────────────────┐
+          │  To browse these events yourself:                               │
+          │    1. Open Event Viewer (eventvwr.msc)                          │
+          │    2. Go to: Windows Logs → Application                         │
+          │    3. Filter by Source: DotnetSamples-EventLogDemo              │
+          │                                                                 │
+          │  These events were saved permanently by the Event Log Service.  │
+          │  No logman, no PerfView, no ETW session needed.                 │
+          │                                                                 │
+          │  For production apps with ETW channels (see ChannelEventSource),│
+          │  this happens automatically through ETW — no API call needed.   │
+          │  The Event Log Service listens to ETW and saves channel events. │
+          └──────────────────────────────────────────────────────────────────┘
+        """);
+        Console.ResetColor();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
