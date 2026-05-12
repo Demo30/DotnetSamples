@@ -23,6 +23,7 @@ static class Program
         }
 
         // In-process listener lets us verify events fire even without ETW.
+        BigSection("PART 1: ETW with logman — manual capture to .etl file");
         Section("In-process listener");
         using var listener = new MyEventSourceListener("InProc");
         Console.WriteLine();
@@ -48,6 +49,11 @@ static class Program
             Console.WriteLine($"  To decode: run elevated, or open {etlPath} in PerfView.");
             Console.ResetColor();
         }
+
+        // ── Part 2: Event Log Channel demo ──────────────────────────────────
+        // This demonstrates the ALTERNATIVE approach: instead of capturing ETW events
+        // yourself with logman, let Windows do it automatically via a "channel".
+        DemoEventLogChannel(isAdmin);
     }
 
     // ── setup ────────────────────────────────────────────────────────────────
@@ -72,10 +78,14 @@ static class Program
     {
         Section("What this sample demonstrates");
         Console.WriteLine("""
-          This program demonstrates the full ETW (Event Tracing for Windows) pipeline:
+          This program demonstrates the full ETW (Event Tracing for Windows) pipeline
+          WITHOUT using channels — meaning events are ephemeral unless you actively
+          capture them with a tool like logman or PerfView.
 
           1. EMIT   — A custom EventSource (MyTestSource) writes structured events in-process
-                      using the .NET EventSource API.
+                      using the .NET EventSource API. No channel is defined, so the Event Log
+                      Service will NOT automatically save these — they only exist in ETW
+                      kernel buffers until someone captures them.
 
           2. CAPTURE — logman creates a kernel-level ETW trace session that intercepts those
                        events and writes them to a binary .etl file, with no code changes
@@ -84,6 +94,9 @@ static class Program
           3. DECODE — tracerpt reads the .etl and converts it to human-readable XML.
                       For payloads to be decoded (rather than shown as raw BinaryEventData),
                       the event schema must be known. This is what the manifest is for.
+
+          Later, Part 2 and Part 3 show alternative approaches that DO persist events
+          automatically — via the traditional EventLog API and via ETW channels.
 
           The manifest is an XML file generated from the EventSource class that describes
           every event: its ID, name, parameters, and message template. It is registered
@@ -269,6 +282,360 @@ static class Program
         }
     }
 
+    // ── Event Log demo ─────────────────────────────────────────────────────
+
+    static void DemoEventLogChannel(bool isAdmin)
+    {
+        Console.WriteLine();
+        Section("Event Log — the built-in \"stenographer\"");
+        Console.WriteLine("""
+          Everything above used logman to manually capture ETW events into an .etl file.
+          But Windows can save events FOR you automatically — using the Event Log.
+
+          Windows has a built-in service called the "Event Log Service" (wevtsvc).
+          It's always running and acts as a permanent event store.
+
+          There are TWO ways to write to the Event Log:
+
+          ┌────────────────────────────────────────────────────────────────────┐
+          │  1. TRADITIONAL API (System.Diagnostics.EventLog)                │
+          │     • Writes directly to the Event Log — simple and immediate    │
+          │     • Events appear in Event Viewer right away                   │
+          │     • Does NOT use ETW at all                                    │
+          │     • Best for: app logging, operational events                  │
+          │                                                                  │
+          │  2. ETW CHANNELS (EventSource + Channel attribute)              │
+          │     • Events flow through ETW kernel buffers first              │
+          │     • The Event Log Service acts as an automatic ETW consumer   │
+          │     • Requires: manifest + native resource DLL + reboot         │
+          │     • Best for: system providers installed via MSI/setup        │
+          └────────────────────────────────────────────────────────────────────┘
+
+          Part 2 below demonstrates approach #1 (traditional API).
+          Part 3 demonstrates approach #2 (ETW channels).
+        """);
+
+        if (!isAdmin)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  Skipping — Event Log source registration requires Administrator.");
+            Console.ResetColor();
+            return;
+        }
+
+        DemoTraditionalEventLog();
+        DemoEtwChannel();
+    }
+
+    static void DemoTraditionalEventLog()
+    {
+        const string sourceName = "DotnetSamples-TraditionalLog";
+        const string logName = "Application";
+
+        BigSection("PART 2: Traditional EventLog API — direct write to Event Viewer");
+        Section("Writing events to Event Viewer");
+        Console.WriteLine($"  Source: {sourceName}");
+        Console.WriteLine($"  Log:    {logName}");
+        Console.WriteLine();
+
+        if (!System.Diagnostics.EventLog.SourceExists(sourceName))
+        {
+            System.Diagnostics.EventLog.CreateEventSource(sourceName, logName);
+            Console.WriteLine($"  Created event source: {sourceName}");
+        }
+
+        System.Diagnostics.EventLog.WriteEntry(sourceName,
+            "[Traditional] App started successfully — listening on port 8080",
+            System.Diagnostics.EventLogEntryType.Information, 100);
+        Console.WriteLine("  → App started (Information, ID=100)");
+
+        System.Diagnostics.EventLog.WriteEntry(sourceName,
+            "[Traditional] Database connection pool initialized — 10 connections ready",
+            System.Diagnostics.EventLogEntryType.Information, 101);
+        Console.WriteLine("  → DB pool ready (Information, ID=101)");
+
+        System.Diagnostics.EventLog.WriteEntry(sourceName,
+            "[Traditional] Memory usage above 80% — consider scaling up",
+            System.Diagnostics.EventLogEntryType.Warning, 102);
+        Console.WriteLine("  → Memory warning (Warning, ID=102)");
+        Console.WriteLine();
+
+        Section("Reading back from Event Viewer");
+
+        using var log = new System.Diagnostics.EventLog(logName);
+        var recent = log.Entries.Cast<System.Diagnostics.EventLogEntry>()
+            .Where(e => e.Source == sourceName)
+            .OrderByDescending(e => e.TimeGenerated)
+            .Take(5)
+            .ToList();
+
+        if (recent.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  ✓ {recent.Count} event(s) found in Event Viewer!");
+            Console.ResetColor();
+            Console.WriteLine();
+
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  {"Time",-22}  {"Type",-12}  {"ID",-4}  Message");
+            Console.WriteLine($"  {"────",-22}  {"────",-12}  {"──",-4}  ───────────────────────────────────");
+            Console.ResetColor();
+
+            foreach (var entry in recent)
+            {
+                Console.Write($"  {entry.TimeGenerated,-22:yyyy-MM-dd HH:mm:ss}  {entry.EntryType,-12}  {entry.InstanceId,-4}  ");
+                Console.ForegroundColor = ConsoleColor.Green;
+                var msg = entry.Message.ReplaceLineEndings(" ");
+                Console.WriteLine(msg.Length > 55 ? msg[..52] + "..." : msg);
+                Console.ResetColor();
+            }
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  No events found (unexpected).");
+            Console.ResetColor();
+        }
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("""
+          ┌──────────────────────────────────────────────────────────────────┐
+          │  To browse these events yourself:                               │
+          │    1. Open Event Viewer (eventvwr.msc)                          │
+          │    2. Go to: Windows Logs → Application                         │
+          │    3. Filter by Source: DotnetSamples-TraditionalLog            │
+          │                                                                 │
+          │  These events were saved permanently by the Event Log Service.  │
+          │  No logman, no PerfView, no ETW session needed.                 │
+          └──────────────────────────────────────────────────────────────────┘
+        """);
+        Console.ResetColor();
+    }
+
+    static void DemoEtwChannel()
+    {
+        var channelName = $"{ChannelEventSource.EventSourceName}/Operational";
+        var manifestPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "EtwEventSourceDemo", "channel-demo.man");
+        var resourceDllPath = Path.ChangeExtension(manifestPath, ".dll");
+
+        BigSection("PART 3: ETW Channel — automatic capture by Event Log Service");
+
+        Section("How ETW channels are defined");
+        Console.WriteLine("""
+            In ChannelEventSource.cs, events are tagged with a channel:
+
+              [Event(1, Channel = EventChannel.Operational, ...)]
+              public void RequestStarted(string url) => WriteEvent(1, url);
+
+            This generates a <channel> entry in the manifest:
+        """);
+
+        var ntdll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
+        var manifest = EventSource.GenerateManifest(typeof(ChannelEventSource), ntdll)!;
+        var channelLine = manifest.Split('\n')
+            .FirstOrDefault(l => l.Contains("<channel ", StringComparison.OrdinalIgnoreCase));
+        if (channelLine != null)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"    {channelLine.Trim()}");
+            Console.ResetColor();
+        }
+        Console.WriteLine();
+
+        Section("Registering the channel");
+        Console.WriteLine("""
+            Unlike the traditional EventLog API (Part 2), this uses the full ETW pipeline:
+              Your code → ETW kernel buffers → Event Log Service → .evtx → Event Viewer
+
+            To make this work, we need to:
+              1. Compile the manifest into a native Win32 resource DLL (mc.exe + rc.exe + csc.exe)
+              2. Register it with wevtutil im
+              3. Emit some events (they won't appear until after reboot)
+              4. Leave everything registered — reboot and run again to see them!
+        """);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+
+        if (!CompileAndRegisterManifest(manifestPath, resourceDllPath, channelName))
+            return;
+
+        // Emit events — they'll be captured by the Event Log Service after reboot
+        if (ChannelEventSource.Log.ConstructionException is { } ex)
+        {
+            WriteError($"ChannelEventSource construction failed: {ex}");
+            return;
+        }
+        Thread.Sleep(500);
+
+        ChannelEventSource.Log.RequestStarted("https://example.com/api/users");
+        ChannelEventSource.Log.RequestCompleted("200 OK — 3 users returned");
+        ChannelEventSource.Log.OperationWarning("Response time exceeded 500ms threshold");
+        Console.WriteLine("  Emitted 3 events via ChannelEventSource.");
+
+        // Check if channel is already active (e.g. after a reboot)
+        var (xml, _) = Run("wevtutil", $"qe \"{channelName}\" /f:text /c:5");
+        if (!string.IsNullOrWhiteSpace(xml))
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n  ✓ Events found in {channelName}!");
+            Console.ResetColor();
+            foreach (var line in xml.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                Console.WriteLine($"    {line.TrimEnd()}");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"\n  Events not visible yet — reboot to activate the channel.");
+            Console.ResetColor();
+        }
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"""
+          After rebooting, check Event Viewer:
+            → Applications and Services Logs → {channelName}
+
+          To clean up later:
+            wevtutil um "{manifestPath}"
+            rmdir /s "{Path.GetDirectoryName(manifestPath)}"
+        """);
+        Console.ResetColor();
+    }
+
+    // Compiles the EventSource manifest into a native Win32 resource DLL and
+    // registers it with the Event Log Service.
+    //
+    // Why? The Event Log Service needs WEVT_TEMPLATE resources (native Win32)
+    // to validate a provider and activate its channel. A plain .NET assembly
+    // doesn't have these, so we compile them using the Windows SDK:
+    //   mc.exe  → manifest → .rc + .h + .bin (message tables)
+    //   rc.exe  → .rc → .res (binary resource)
+    //   csc.exe → .res → .dll (minimal DLL with embedded resources)
+    static bool CompileAndRegisterManifest(string manifestPath, string resourceDllPath, string channelName)
+    {
+        var workDir = Path.Combine(Path.GetTempPath(), "channel-demo-build");
+        Directory.CreateDirectory(workDir);
+
+        var sdkBin = FindSdkBinPath();
+        if (sdkBin == null) { WriteError("Windows SDK not found (mc.exe needed)."); return false; }
+        var cscPath = FindCscPath();
+        if (cscPath == null) { WriteError("csc.exe not found."); return false; }
+
+        var mcExe = Path.Combine(sdkBin, "mc.exe");
+        var rcExe = Path.Combine(sdkBin, "rc.exe");
+
+        // Generate manifest pointing to the resource DLL location
+        var manifest = EventSource.GenerateManifest(typeof(ChannelEventSource), resourceDllPath)!;
+        File.WriteAllText(manifestPath, manifest);
+
+        // mc.exe: manifest → .rc + .bin
+        var (_, mcErr) = Run(mcExe, $"-um \"{manifestPath}\" -h \"{workDir}\" -r \"{workDir}\"");
+        if (mcErr?.Contains("error", StringComparison.OrdinalIgnoreCase) == true)
+        { WriteError($"mc.exe: {mcErr.Trim()}"); return false; }
+
+        // rc.exe: .rc → .res
+        var rcFile = Directory.GetFiles(workDir, "*.rc").FirstOrDefault();
+        if (rcFile == null) { WriteError("mc.exe produced no .rc file."); return false; }
+        Run(rcExe, $"\"{rcFile}\"");
+
+        // csc.exe: .res → minimal DLL
+        var resFile = Path.ChangeExtension(rcFile, ".res");
+        if (!File.Exists(resFile)) { WriteError("rc.exe produced no .res file."); return false; }
+        Run(cscPath, $"-target:library -out:\"{resourceDllPath}\" -win32res:\"{resFile}\" -nologo");
+        if (!File.Exists(resourceDllPath)) { WriteError("csc.exe failed to create resource DLL."); return false; }
+
+        // Grant read access so the Event Log Service (SYSTEM) can load it
+        Run("icacls", $"\"{resourceDllPath}\" /grant Everyone:(R)");
+
+        // Register the manifest
+        Run("wevtutil", $"um \"{manifestPath}\"");
+        var (_, regErr) = Run("wevtutil", $"im \"{manifestPath}\"");
+        Run("wevtutil", $"sl \"{channelName}\" /e:true");
+
+        bool ok = string.IsNullOrWhiteSpace(regErr) ||
+            regErr.Contains("does not contain the metadata resource", StringComparison.OrdinalIgnoreCase);
+
+        if (ok)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  ✓ Manifest registered. Channel: {channelName}");
+            Console.ResetColor();
+
+            // Verify provider metadata is loadable
+            var (gpOut, _) = Run("wevtutil", $"gp \"{ChannelEventSource.EventSourceName}\"");
+            if (gpOut?.Contains("channels:") == true)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("  ✓ Provider metadata loads correctly.");
+                Console.ResetColor();
+            }
+        }
+        else
+        {
+            WriteError($"wevtutil im: {regErr.Trim()}");
+        }
+
+        try { Directory.Delete(workDir, true); } catch { }
+        return ok;
+    }
+
+    static string? FindSdkBinPath()
+    {
+        var kitsRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "Windows Kits", "10", "bin");
+        if (!Directory.Exists(kitsRoot)) return null;
+        return Directory.GetDirectories(kitsRoot, "10.*")
+            .OrderByDescending(d => d)
+            .Select(d => Path.Combine(d, "x64"))
+            .FirstOrDefault(d => File.Exists(Path.Combine(d, "mc.exe")));
+    }
+
+    static string? FindCscPath()
+    {
+        // .NET Framework csc.exe
+        var fw = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe");
+        if (File.Exists(fw)) return fw;
+
+        // Visual Studio Roslyn csc.exe
+        foreach (var vsRoot in new[] {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio"),
+        }.Where(Directory.Exists))
+        {
+            var csc = Directory.GetFiles(vsRoot, "csc.exe", SearchOption.AllDirectories)
+                .OrderByDescending(f => f).FirstOrDefault();
+            if (csc != null) return csc;
+        }
+        return null;
+    }
+
+    static (string Out, string Err) Run(string exe, string args)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false,
+                CreateNoWindow         = true,
+            })!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            p.WaitForExit();
+            return (outTask.Result, errTask.Result);
+        }
+        catch (Exception ex)
+        {
+            return ("", $"[error launching {exe}]: {ex.Message}");
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     static void Section(string title)
@@ -277,6 +644,17 @@ static class Program
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine($"── {title} {line}");
         Console.ResetColor();
+    }
+
+    static void BigSection(string title)
+    {
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine(new string('═', 70));
+        Console.WriteLine($"  {title}");
+        Console.WriteLine(new string('═', 70));
+        Console.ResetColor();
+        Console.WriteLine();
     }
 
     static void WriteError(string message)
