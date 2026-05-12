@@ -317,6 +317,7 @@ static class Program
 
         ShowChannelSourceCode();
         DemoTraditionalEventLog();
+        DemoEtwChannel();
     }
 
     static void ShowChannelSourceCode()
@@ -441,6 +442,210 @@ static class Program
           └──────────────────────────────────────────────────────────────────┘
         """);
         Console.ResetColor();
+    }
+
+    static void DemoEtwChannel()
+    {
+        var channelName = $"{ChannelEventSource.EventSourceName}/Operational";
+        var manifestPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "EtwEventSourceDemo", "channel-demo.man");
+        var resourceDllPath = Path.ChangeExtension(manifestPath, ".dll");
+
+        Console.WriteLine();
+        Section("[ETW Channel] Registering for post-reboot test");
+        Console.WriteLine("""
+            This section registers the ChannelEventSource manifest so the Event Log
+            Service will start consuming its ETW channel after a reboot.
+
+            Unlike the traditional EventLog API above, this uses the full ETW pipeline:
+              Your code → ETW kernel buffers → Event Log Service → .evtx → Event Viewer
+
+            The Event Log Service only picks up new channels at boot time, so a reboot
+            is required before events appear. Here's what we do now:
+              1. Compile the manifest into a native Win32 resource DLL (mc.exe + rc.exe + csc.exe)
+              2. Register it with wevtutil im
+              3. Emit some events (they won't appear until after reboot)
+              4. Leave everything registered — reboot and run again to see them!
+        """);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+
+        if (!CompileAndRegisterManifest(manifestPath, resourceDllPath, channelName))
+            return;
+
+        // Emit events — they'll be captured by the Event Log Service after reboot
+        if (ChannelEventSource.Log.ConstructionException is { } ex)
+        {
+            WriteError($"ChannelEventSource construction failed: {ex}");
+            return;
+        }
+        Thread.Sleep(500);
+
+        ChannelEventSource.Log.RequestStarted("https://example.com/api/users");
+        ChannelEventSource.Log.RequestCompleted("200 OK — 3 users returned");
+        ChannelEventSource.Log.OperationWarning("Response time exceeded 500ms threshold");
+        Console.WriteLine("  Emitted 3 events via ChannelEventSource.");
+
+        // Check if channel is already active (e.g. after a reboot)
+        var (xml, _) = Run("wevtutil", $"qe \"{channelName}\" /f:text /c:5");
+        if (!string.IsNullOrWhiteSpace(xml))
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n  ✓ Events found in {channelName}!");
+            Console.ResetColor();
+            foreach (var line in xml.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                Console.WriteLine($"    {line.TrimEnd()}");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"\n  Events not visible yet — reboot to activate the channel.");
+            Console.ResetColor();
+        }
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"""
+          After rebooting, check Event Viewer:
+            → Applications and Services Logs → {channelName}
+
+          To clean up later:
+            wevtutil um "{manifestPath}"
+            rmdir /s "{Path.GetDirectoryName(manifestPath)}"
+        """);
+        Console.ResetColor();
+    }
+
+    // Compiles the EventSource manifest into a native Win32 resource DLL and
+    // registers it with the Event Log Service.
+    //
+    // Why? The Event Log Service needs WEVT_TEMPLATE resources (native Win32)
+    // to validate a provider and activate its channel. A plain .NET assembly
+    // doesn't have these, so we compile them using the Windows SDK:
+    //   mc.exe  → manifest → .rc + .h + .bin (message tables)
+    //   rc.exe  → .rc → .res (binary resource)
+    //   csc.exe → .res → .dll (minimal DLL with embedded resources)
+    static bool CompileAndRegisterManifest(string manifestPath, string resourceDllPath, string channelName)
+    {
+        var workDir = Path.Combine(Path.GetTempPath(), "channel-demo-build");
+        Directory.CreateDirectory(workDir);
+
+        var sdkBin = FindSdkBinPath();
+        if (sdkBin == null) { WriteError("Windows SDK not found (mc.exe needed)."); return false; }
+        var cscPath = FindCscPath();
+        if (cscPath == null) { WriteError("csc.exe not found."); return false; }
+
+        var mcExe = Path.Combine(sdkBin, "mc.exe");
+        var rcExe = Path.Combine(sdkBin, "rc.exe");
+
+        // Generate manifest pointing to the resource DLL location
+        var manifest = EventSource.GenerateManifest(typeof(ChannelEventSource), resourceDllPath)!;
+        File.WriteAllText(manifestPath, manifest);
+
+        // mc.exe: manifest → .rc + .bin
+        var (_, mcErr) = Run(mcExe, $"-um \"{manifestPath}\" -h \"{workDir}\" -r \"{workDir}\"");
+        if (mcErr?.Contains("error", StringComparison.OrdinalIgnoreCase) == true)
+        { WriteError($"mc.exe: {mcErr.Trim()}"); return false; }
+
+        // rc.exe: .rc → .res
+        var rcFile = Directory.GetFiles(workDir, "*.rc").FirstOrDefault();
+        if (rcFile == null) { WriteError("mc.exe produced no .rc file."); return false; }
+        Run(rcExe, $"\"{rcFile}\"");
+
+        // csc.exe: .res → minimal DLL
+        var resFile = Path.ChangeExtension(rcFile, ".res");
+        if (!File.Exists(resFile)) { WriteError("rc.exe produced no .res file."); return false; }
+        Run(cscPath, $"-target:library -out:\"{resourceDllPath}\" -win32res:\"{resFile}\" -nologo");
+        if (!File.Exists(resourceDllPath)) { WriteError("csc.exe failed to create resource DLL."); return false; }
+
+        // Grant read access so the Event Log Service (SYSTEM) can load it
+        Run("icacls", $"\"{resourceDllPath}\" /grant Everyone:(R)");
+
+        // Register the manifest
+        Run("wevtutil", $"um \"{manifestPath}\"");
+        var (_, regErr) = Run("wevtutil", $"im \"{manifestPath}\"");
+        Run("wevtutil", $"sl \"{channelName}\" /e:true");
+
+        bool ok = string.IsNullOrWhiteSpace(regErr) ||
+            regErr.Contains("does not contain the metadata resource", StringComparison.OrdinalIgnoreCase);
+
+        if (ok)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  ✓ Manifest registered. Channel: {channelName}");
+            Console.ResetColor();
+
+            // Verify provider metadata is loadable
+            var (gpOut, _) = Run("wevtutil", $"gp \"{ChannelEventSource.EventSourceName}\"");
+            if (gpOut?.Contains("channels:") == true)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("  ✓ Provider metadata loads correctly.");
+                Console.ResetColor();
+            }
+        }
+        else
+        {
+            WriteError($"wevtutil im: {regErr.Trim()}");
+        }
+
+        try { Directory.Delete(workDir, true); } catch { }
+        return ok;
+    }
+
+    static string? FindSdkBinPath()
+    {
+        var kitsRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "Windows Kits", "10", "bin");
+        if (!Directory.Exists(kitsRoot)) return null;
+        return Directory.GetDirectories(kitsRoot, "10.*")
+            .OrderByDescending(d => d)
+            .Select(d => Path.Combine(d, "x64"))
+            .FirstOrDefault(d => File.Exists(Path.Combine(d, "mc.exe")));
+    }
+
+    static string? FindCscPath()
+    {
+        // .NET Framework csc.exe
+        var fw = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe");
+        if (File.Exists(fw)) return fw;
+
+        // Visual Studio Roslyn csc.exe
+        foreach (var vsRoot in new[] {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio"),
+        }.Where(Directory.Exists))
+        {
+            var csc = Directory.GetFiles(vsRoot, "csc.exe", SearchOption.AllDirectories)
+                .OrderByDescending(f => f).FirstOrDefault();
+            if (csc != null) return csc;
+        }
+        return null;
+    }
+
+    static (string Out, string Err) Run(string exe, string args)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false,
+                CreateNoWindow         = true,
+            })!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            p.WaitForExit();
+            return (outTask.Result, errTask.Result);
+        }
+        catch (Exception ex)
+        {
+            return ("", $"[error launching {exe}]: {ex.Message}");
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
